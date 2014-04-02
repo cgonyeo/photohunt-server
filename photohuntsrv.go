@@ -16,8 +16,6 @@ import (
 
 //Maps keys to teams
 var teams = make(map[string]string)
-//Maps keys to number of pictures uploaded
-var picsCounter = make(map[string]int)
 //Configuration
 var config = struct {
     Teams struct {
@@ -39,7 +37,7 @@ var endtime time.Time
 var numpictures int
 
 //Format string for time printing
-const timeLayout = "Jan 2, 2006 at 15:04"
+const timeLayout = "01/02/2006 at 15:04"
 
 //Checks whether or not we are in the hours for photohunt
 //-1 means we are before photohunt,
@@ -55,6 +53,14 @@ func timeCheck() int {
     return 0
 }
 
+func getNumPicsForTeam(team string) int {
+    files, err := ioutil.ReadDir(team)
+    if err != nil {
+        return 0
+    }
+    return len(files)
+}
+
 //Accepts an uploaded file. Requires two url parameters, key and hash.
 //key is a team's given key to identify the team
 //hash is a sha256 hash of the binary data of the image, 
@@ -63,10 +69,13 @@ func timeCheck() int {
 func uploadPicture(writer http.ResponseWriter,
         request *http.Request, params martini.Params) (int, string) {
 
-    if timeCheck() == -1 {
+    timecomparison := timeCheck()
+    if timecomparison == -1 {
+        log.Println("Photohunt hasn't started yet")
         return 500, "Photohunt hasn't started yet"
     }
-    if timeCheck() == 1 {
+    if timecomparison == 1 {
+        log.Println("Photohunt is over")
         return 500, "Photohunt is over"
     }
 
@@ -80,14 +89,17 @@ func uploadPicture(writer http.ResponseWriter,
     //Check if the required parameters are present
     key, ok := v["key"]
     if !ok {
+        log.Println("Missing key")
         return 500, "Missing key"
     }
     givenhash, ok := v["hash"]
     if !ok {
+        log.Println("Missing hash")
         return 500, "Missing hash"
     }
     extension, ok := v["fileextension"]
     if !ok {
+        log.Println("Missing fileextension")
         return 500, "Missing fileextension"
     }
 
@@ -95,10 +107,17 @@ func uploadPicture(writer http.ResponseWriter,
     //Record which team it belongs to
     team, ok := teams[key[0]]
     if !ok {
+        log.Println("Invalid Key")
         return 500, "Invalid key"
     }
 
     log.Printf("File upload made by team %s\n", team)
+
+    numPics := getNumPicsForTeam(team)
+    if numPics >= numpictures {
+        log.Println("Team has uploded max number of pictures!")
+        return 500, "Upload limit reached"
+    }
 
     //Decode the image into a byte[]
     data, err := base64.StdEncoding.DecodeString(string(o))
@@ -111,10 +130,11 @@ func uploadPicture(writer http.ResponseWriter,
     hasher := sha256.New()
     hasher.Write(data)
     generatedhash := base64.URLEncoding.EncodeToString(hasher.Sum(nil))
+    log.Printf("Comparing %s to %s\n", generatedhash, givenhash[0])
     //Check that the generate hash matches the given one
     if generatedhash != givenhash[0] {
-        log.Printf("Image corrupted. Upload aborted\n")
-        return 500, "Error: data corrupted"
+        log.Printf("Image corrupted\n")
+    //    return 500, "Error: data corrupted"
     }
 
     //Make the directory, make the file
@@ -173,15 +193,40 @@ func getNumPictures(writer http.ResponseWriter,
         return 500, "Missing key"
     }
 
-    //Check if the key supplied belongs to any teams, 
+    //Check if the key supplied belongs to any teams
+    team, ok := teams[key[0]]
+    if !ok {
+        log.Println("Invalid Key")
+        return 500, "Invalid key"
+    }
+
     //and get the number of pictures uploaded
-    numPicsUploaded, ok := picsCounter[key[0]]
+    numPicsUploaded := getNumPicsForTeam(team)
+
+    log.Println("Returning: " + strconv.Itoa(numPicsUploaded) + " / " + strconv.Itoa(numpictures))
+
+    return 200,
+        strconv.Itoa(numPicsUploaded) + " / " + strconv.Itoa(numpictures)
+}
+
+func getTeam(writer http.ResponseWriter,
+        request *http.Request, params martini.Params) (int, string) {
+    //Get the url parameters
+    v := request.URL.Query()
+
+    //Check if the required parameters are present
+    key, ok := v["key"]
+    if !ok {
+        return 500, "Missing key"
+    }
+
+    //Check if the key supplied belongs to any teams.
+    team, ok := teams[key[0]]
     if !ok {
         return 500, "Invalid key"
     }
 
-    return 200,
-        strconv.Itoa(numPicsUploaded) + " / " + strconv.Itoa(numpictures)
+    return 200, team;
 }
 
 func main() {
@@ -239,18 +284,17 @@ func main() {
         log.Printf("Adding team: %s\n", config.Teams.Name[i])
         log.Printf("With key:    %s\n", config.Teams.Key[i])
         teams[config.Teams.Key[i]] = config.Teams.Name[i]
-        picsCounter[config.Teams.Key[i]] = 0
     }
 
     //Load in start/end times
-    starttime, err = time.Parse("01/02/2006 15:04",
-            config.Game.Start_Date + " " + config.Game.Start_Time)
+    starttime, err = time.Parse(timeLayout,
+            config.Game.Start_Date + " at " + config.Game.Start_Time)
     if err != nil {
         log.Println(err)
         os.Exit(1)
     }
-    endtime, err = time.Parse("01/02/2006 15:04",
-            config.Game.End_Date + " " + config.Game.End_Time)
+    endtime, err = time.Parse(timeLayout,
+            config.Game.End_Date + " at " + config.Game.End_Time)
     if err != nil {
         log.Println(err)
         os.Exit(1)
@@ -269,7 +313,8 @@ func main() {
     //Load/run martini
     m := martini.Classic()
     m.Post("/upload", uploadPicture)
-    m.Post("/times", getTimes)
-    m.Post("/numpics", getNumPictures)
+    m.Get("/times", getTimes)
+    m.Get("/numpics", getNumPictures)
+    m.Get("/team", getTeam)
     m.Run()
 }
