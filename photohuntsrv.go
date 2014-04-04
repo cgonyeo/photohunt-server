@@ -12,6 +12,7 @@ import (
     "bufio"
     "code.google.com/p/gcfg"
     "strconv"
+    "strings"
 )
 
 //Maps keys to teams
@@ -59,6 +60,42 @@ func getNumPicsForTeam(team string) int {
         return 0
     }
     return len(files)
+}
+
+func appendToFile(filename string, line string) error {
+    _, err := os.Stat(filename)
+    var file *os.File
+    if os.IsNotExist(err) {
+        file, err = os.Create(filename)
+    } else {
+        file, err = os.OpenFile(filename, os.O_RDWR|os.O_APPEND, 0755)
+    }
+    if err != nil {
+        return err
+    }
+    defer file.Close()
+    _, err = file.WriteString(line)
+    if err != nil {
+        return err
+    }
+    return nil
+}
+
+// readLines reads a whole file into memory
+// and returns a slice of its lines.
+func readLines(path string) ([]string, error) {
+  file, err := os.Open(path)
+  if err != nil {
+    return nil, err
+  }
+  defer file.Close()
+
+  var lines []string
+  scanner := bufio.NewScanner(file)
+  for scanner.Scan() {
+    lines = append(lines, scanner.Text())
+  }
+  return lines, scanner.Err()
 }
 
 //Accepts an uploaded file. Requires two url parameters, key and hash.
@@ -130,15 +167,53 @@ func uploadPicture(writer http.ResponseWriter,
     hasher := sha256.New()
     hasher.Write(data)
     generatedhash := base64.URLEncoding.EncodeToString(hasher.Sum(nil))
-    log.Printf("Comparing %s to %s\n", generatedhash, givenhash[0])
+    log.Printf("Comparing \"%s\" to \"%s\"\n",
+            strings.TrimSpace(generatedhash),
+            strings.TrimSpace(givenhash[0]))
+
     //Check that the generate hash matches the given one
-    if generatedhash != givenhash[0] {
+    if strings.TrimSpace(generatedhash) !=
+            strings.TrimSpace(givenhash[0]) {
         log.Printf("Image corrupted\n")
-    //    return 500, "Error: data corrupted"
+        return 500, "Error: data corrupted"
+    }
+
+    //Check that we haven't received this hash before
+    lines, err := readLines("hashes/" + team + ".hash")
+    if err != nil && !os.IsNotExist(err) {
+        log.Println("Error reading hash file")
+        return 500, "Internal server error"
+    }
+
+    for _, line := range(lines) {
+        if generatedhash == strings.TrimSpace(line) {
+            log.Println("Duplicate file. Upload aborted")
+            return 500, "Duplicate file"
+        }
+    }
+
+    //Write down the hash
+    _, err = os.Stat("hashes")
+    if os.IsNotExist(err) {
+        err = os.Mkdir("hashes", 0755)
+    }
+    if err != nil {
+        log.Printf("Error creating hash folder. Upload aborted\n")
+        return 500, "Internal server error"
+    }
+    log.Printf("Making " + "hashes/" + team + ".hash\n")
+    err =
+        appendToFile("hashes/" + team + ".hash", generatedhash + "\n")
+    if err != nil {
+        log.Printf("Error creating or writing to hash file\n")
+        return 500, "Internal server error"
     }
 
     //Make the directory, make the file
-    err = os.Mkdir(team, 0755)
+    _, err = os.Stat(team)
+    if os.IsNotExist(err) {
+        err = os.Mkdir(team, 0755)
+    }
     file, err := os.Create(team + "/" + time.Now().Format(time.RFC850) + "." + extension[0])
     if err != nil {
         log.Printf("Error creating file. Upload aborted\n")
@@ -287,14 +362,14 @@ func main() {
     }
 
     //Load in start/end times
-    starttime, err = time.Parse(timeLayout,
-            config.Game.Start_Date + " at " + config.Game.Start_Time)
+    starttime, err = time.Parse(timeLayout + " (MST)",
+            config.Game.Start_Date + " at " + config.Game.Start_Time + " (EDT)")
     if err != nil {
         log.Println(err)
         os.Exit(1)
     }
-    endtime, err = time.Parse(timeLayout,
-            config.Game.End_Date + " at " + config.Game.End_Time)
+    endtime, err = time.Parse(timeLayout + " (MST)",
+            config.Game.End_Date + " at " + config.Game.End_Time + " (EDT)")
     if err != nil {
         log.Println(err)
         os.Exit(1)
@@ -316,5 +391,9 @@ func main() {
     m.Get("/times", getTimes)
     m.Get("/numpics", getNumPictures)
     m.Get("/team", getTeam)
-    m.Run()
+    //m.Run()
+    log.Println("Listening for https on port 3912")
+    if err := http.ListenAndServeTLS(":3912", "server.crt", "server.key", m); err != nil {
+        log.Fatal(err)
+    }
 }
